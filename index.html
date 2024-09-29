@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Florida Shipwrecks Map</title>
+    <style>
+        /* Set the size of the map */
+        #map {
+            height: 100vh; /* Full height of the viewport */
+            width: 100%;   /* Full width */
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/geotiff"></script>
+</head>
+<body>
+    <h1>Florida Shipwrecks Map</h1>
+    <div id="map"></div>
+
+    <script>
+        let map;
+        let infoWindow;
+        let geotiffData; // This will hold the raster data directly
+        let modelPixelScale; // To hold pixel scale
+        let modelTiepoint; // To hold tiepoint data
+        const bounds = {
+            north: 31.0,
+            south: 22.0,
+            west: -87.6349,
+            east: -78.031
+        };
+
+        async function loadGeoTIFF() {
+            try {
+                const response = await fetch('gebco_2024_n31.0_s22.0_w-87.6349_e-78.031.tif'); // Update with your GeoTIFF path
+                const arrayBuffer = await response.arrayBuffer();
+                const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer); // Load the TIFF
+                const image = await tiff.getImage(); // Get the first image
+                
+                // Retrieve metadata
+                const { ModelPixelScale, ModelTiepoint } = image.fileDirectory;
+                modelPixelScale = ModelPixelScale; // Store pixel scale
+                modelTiepoint = ModelTiepoint; // Store tiepoint data
+                
+                console.log('ModelPixelScale:', modelPixelScale);
+                console.log('ModelTiepoint:', modelTiepoint);
+                
+                // Read raster data and store it directly in geotiffData
+                geotiffData = await image.readRasters();
+                console.log('GeoTIFF data loaded:', geotiffData); // Log GeoTIFF data
+
+                // Log raster data dimensions
+                console.log('Raster Data Width:', image.getWidth());
+                console.log('Raster Data Height:', image.getHeight());
+
+                // Check the range of depth values
+                const depthSamples = geotiffData[0]; // Assuming depth data is in the first band
+                console.log('Depth Range:', Math.min(...depthSamples), Math.max(...depthSamples)); // Log min/max depth values
+
+            } catch (error) {
+                console.error('Error loading GeoTIFF:', error);
+            }
+        }
+
+        function transformCoordinates(lat, lng) {
+            const pixelX = Math.round(((lng - bounds.west) / (bounds.east - bounds.west)) * geotiffData.width);
+            const pixelY = Math.round(((bounds.north - lat) / (bounds.north - bounds.south)) * geotiffData.height); // Notice the inversion for Y
+            return { pixelX, pixelY };
+        }
+
+        async function getDepth(lat, lng) {
+            if (!geotiffData) return null;
+
+            const { pixelX, pixelY } = transformCoordinates(lat, lng);
+            console.log(`Calculated Pixel X: ${pixelX}, Pixel Y: ${pixelY}`);
+
+            // Ensure pixel coordinates are within bounds
+            if (pixelX < 0 || pixelX >= geotiffData.width || pixelY < 0 || pixelY >= geotiffData.height) {
+                console.warn('Pixel coordinates out of bounds:', pixelX, pixelY);
+                return null; // Out of bounds
+            }
+
+            // Access the first band of the raster data (assumed to be depth data)
+            const rasterArray = geotiffData[0]; // Get the first band
+            const depthValue = rasterArray[pixelY * geotiffData.width + pixelX]; // Adjusted indexing
+            console.log(`Raw Depth value at Pixel (${pixelX}, ${pixelY}):`, depthValue);
+
+            // Convert depth from meters to feet if necessary
+            const depthInFeet = depthValue * 3.281; // Assuming depth values are in meters
+            console.log(`Converted Depth value in feet:`, depthInFeet);
+
+            return depthInFeet !== undefined ? depthInFeet : null; // Return null if depthValue is not defined
+        }
+
+        async function loadGeoJSON() {
+            const response = await fetch('AWOIS_Wrecks.geojson'); // Update path if necessary
+            const geojsonContent = await response.json(); // Load GeoJSON data
+            
+            geojsonContent.features.forEach(function(feature) {
+                const name = feature.properties.VESSLTERMS; // Use correct property name for the shipwreck name
+                const history = feature.properties.HISTORY; // Extract the HISTORY property
+                const lat = parseFloat(feature.properties.LATDEC);
+                const lng = parseFloat(feature.properties.LONDEC);
+                
+                //if (name && name !== 'UNKNOWN') {
+                    // Create a point feature on the map
+                    const marker = new google.maps.Marker({
+                        position: { lat, lng },
+                        icon: {
+                            url: 'http://maps.google.com/mapfiles/ms/icons/blue-dot.png', // Use small blue dot
+                            scaledSize: new google.maps.Size(25, 25) // Set size of the marker
+                        },
+                        map: map
+                    });
+
+                    // Add click listener to the marker
+                    google.maps.event.addListener(marker, 'click', async function() {
+                        const depth = await getDepth(lat, lng); // Get depth for the point
+                        const contentString = `
+                            <div>
+                                <h2>${name}</h2>
+                                <p>Depth: ${depth !== null ? depth.toFixed(2) + ' feet' : 'Data not available'}</p>
+                                <p>History: ${history ? history : 'No history available'}</p>
+                                <p>Latitude: ${lat.toFixed(5)}, Longitude: ${lng.toFixed(5)}</p>
+                            </div>
+                        `;
+                        infoWindow.setContent(contentString);
+                        infoWindow.setPosition(marker.getPosition());
+                        infoWindow.open(map);
+                    });
+               // }
+            });
+        }
+
+        function initMap() {
+            map = new google.maps.Map(document.getElementById("map"), {
+                center: { lat: 27.9949, lng: -81.7603 },
+                zoom: 6,
+                restriction: {
+                    latLngBounds: {
+                        north: bounds.north,
+                        south: bounds.south,
+                        east: bounds.east,
+                        west: bounds.west
+                    },
+                    strictBounds: true,
+                }
+            });
+
+            infoWindow = new google.maps.InfoWindow();
+
+            // Add a click event to the map to get depth at clicked location
+            map.addListener('click', async (event) => {
+                const lat = event.latLng.lat();
+                const lng = event.latLng.lng();
+                const depth = await getDepth(lat, lng); // Get depth for the clicked point
+                const contentString = `
+                    <div>
+                        <h2>Clicked Location</h2>
+                        <p>Depth: ${depth !== null ? depth.toFixed(2) + ' feet' : 'Data not available'}</p>
+                        <p>Latitude: ${lat.toFixed(5)}, Longitude: ${lng.toFixed(5)}</p>
+                    </div>
+                `;
+                infoWindow.setContent(contentString);
+                infoWindow.setPosition(event.latLng);
+                infoWindow.open(map);
+            });
+
+            loadGeoTIFF().then(() => {
+                loadGeoJSON(); // Load GeoJSON 
+            });
+        }
+    </script>
+    <script async
+    src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAp_4HeJQqk-H2IIu4jwrH2seAPJxcdvx8&callback=initMap"></script>
+</body>
+</html>
